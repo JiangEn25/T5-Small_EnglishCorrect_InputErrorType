@@ -6,8 +6,8 @@ import language_tool_python
 from torch.utils.data import Dataset, DataLoader
 import chardet
 from sklearn.metrics import accuracy_score, recall_score
-"""Note, note! If the model generates a sentence that has the same meaning as the correct answer but a different expression 
-(e.g., "isn't" vs. "is not"), it may mistakenly be considered incorrect and require manual adjustment."""
+import re
+
 # 1. 加载模型和分词器
 model_load_path = 'd:/jupyter/transformer/grammar_correction_model1'
 tokenizer = T5Tokenizer.from_pretrained(model_load_path)
@@ -36,7 +36,39 @@ error_type_mapping = {
     'THIS_NNS': 33, 'UPPERCASE_SENTENCE_START': 34, 'WANNA': 35, 'WRONG_APOSTROPHE': 36, 'none': 37
 }
 
-# 3. Grammar correction using T5 model with error type input
+# 3. 编写缩写转全写的函数
+CONTRACTIONS = {
+    "isn't": "is not",
+    "don't": "do not",
+    "doesn't": "does not",
+    "can't": "cannot",
+    "couldn't": "could not",
+    "won't": "will not",
+    "didn't": "did not",
+    "haven't": "have not",
+    "hasn't": "has not",
+    "wasn't": "was not",
+    "weren't": "were not",
+    "isn't": "is not",
+    "aren't": "are not",
+    "it's": "it is",
+    "he's": "he is",
+    "she's": "she is",
+    "they're": "they are",
+    "we're": "we are",
+    "you've": "you have",
+    "you'll": "you will",
+    "i'm": "i am"
+}
+
+def expand_contractions(text):
+    pattern = re.compile(r"\b(" + "|".join(CONTRACTIONS.keys()) + r")\b")
+    return pattern.sub(lambda x: CONTRACTIONS[x.group()], text)
+
+def standardize_contractions(texts):
+    return [expand_contractions(text) for text in texts]
+
+# 4. Grammar correction using T5 model with error type input
 def identify_error_type(sentence, tool, error_type_mapping):
     matches = tool.check(sentence)
     if matches:
@@ -56,7 +88,7 @@ def correct_grammar_with_type(text, tool, error_type_mapping):
     corrected_text = corrected_text.replace(f"grammar: {error_type_idx} ", "")
     return corrected_text
 
-# 4. Grammar correction using the second model
+# 5. Grammar correction using the second model
 class GrammarCorrectionDataset(Dataset):
     def __init__(self, csv_file, tokenizer, max_length=128, encoding='utf-8'):
         with open(csv_file, 'rb') as f:
@@ -81,12 +113,12 @@ class GrammarCorrectionDataset(Dataset):
             'correct': correct
         }
 
-# 5. 手动计算 F0.5 分数
+# 6. 手动计算 F0.5 分数
 def f05_score(precision, recall):
     beta = 0.5
     return (1 + beta**2) * (precision * recall) / (beta**2 * precision + recall)
 
-# 6. 评估模型并获取预测与实际标签
+# 7. 评估模型并获取预测与实际标签
 def evaluate_model(model, dataloader, tokenizer, device):
     model.eval()
     all_labels = []
@@ -100,8 +132,13 @@ def evaluate_model(model, dataloader, tokenizer, device):
             outputs = model.generate(input_ids)
             predicted_texts = [tokenizer.decode(output, skip_special_tokens=True) for output in outputs]
             correct_texts = [tokenizer.decode(label, skip_special_tokens=True) for label in labels]
-            all_labels.extend(correct_texts)
-            all_predictions.extend(predicted_texts)
+            
+            # 标准化缩写词
+            standardized_predictions = standardize_contractions(predicted_texts)
+            standardized_labels = standardize_contractions(correct_texts)
+            
+            all_labels.extend(standardized_labels)
+            all_predictions.extend(standardized_predictions)
     
     true_labels = np.array(all_labels)
     predictions = np.array(all_predictions)
@@ -117,51 +154,17 @@ def evaluate_model(model, dataloader, tokenizer, device):
     
     return accuracy, recall, f05, all_labels, all_predictions
 
-# 7. 加载验证集数据
-val_data_path = 'd:/jupyter/transformer/Subject-verb agreement2.csv'  # 请替换为你的文件路径
+# 8. 加载验证集数据
+val_data_path = 'd:/jupyter/transformer/testdata/SpellingErrors_Test2.csv'  # 请替换为你的文件路径
 val_dataset = GrammarCorrectionDataset(val_data_path, tokenizer2)
 val_dataloader = DataLoader(val_dataset, batch_size=16, shuffle=False)
 
-# 8. 评估两个模型
+# 9. 评估两个模型
 accuracy_1, recall_1, f05_1, all_labels1, all_predictions1 = evaluate_model(model, val_dataloader, tokenizer, device)
 accuracy_2, recall_2, f05_2, all_labels2, all_predictions2 = evaluate_model(model2, val_dataloader, tokenizer2, device)
 
-# 9. 打印准确率、召回率和 F0.5 分数
+# 10. 打印准确率、召回率和 F0.5 分数
 print(f"Model 1 - Accuracy: {accuracy_1:.4f}, Recall: {recall_1:.4f}, F0.5: {f05_1:.4f}")
 print(f"Model 2 - Accuracy: {accuracy_2:.4f}, Recall: {recall_2:.4f}, F0.5: {f05_2:.4f}")
 
-# 10. 比较两个方法的输出并显示差异
-tool = language_tool_python.LanguageTool('en-US')
-df = pd.read_csv(val_data_path)
-
-# 初始化存储不同结果的列表
-incorrect_sentences = []
-model_1_corrected_sentences = []
-model_2_corrected_sentences = []
-correct_sentences = []
-
-# 对比结果
-for idx, row in df.iterrows():
-    incorrect = row['incorrect']
-    correct = row['correct']
-    
-    # 通过第一个模型纠正
-    model_1_corrected = correct_grammar_with_type(incorrect, tool, error_type_mapping)
-    
-    # 通过第二个模型纠正
-    model_2_corrected = all_predictions2[idx]
-    
-    # 如果模型1和模型2的结果不同，记录差异
-    if model_1_corrected.strip() != model_2_corrected.strip():
-        incorrect_sentences.append(incorrect)
-        model_1_corrected_sentences.append(model_1_corrected)
-        model_2_corrected_sentences.append(model_2_corrected)
-        correct_sentences.append(correct)
-
-# 打印差异并显示正确答案
-for i in range(len(incorrect_sentences)):
-    print(f"Input (Incorrect): {incorrect_sentences[i]}")
-    print(f"Model 1 Corrected: {model_1_corrected_sentences[i]}")
-    print(f"Model 2 Corrected: {model_2_corrected_sentences[i]}")
-    print(f"Correct Answer: {correct_sentences[i]}")
-    print("-" * 50)
+# 11. 比较两个方法的输出并显示差异
